@@ -3,8 +3,9 @@ import { Dimensions, PanResponder, Platform, ScrollView, StyleSheet, Text, Touch
 import { getEntriesByDate, getAllEntries, EntryRow } from './database';
 
 type ViewMode = '1day' | '3days' | '1week';
+type DisplayMode = 'calendar' | 'list';
 
-const HOUR_HEIGHT = 56;
+const DEFAULT_HOUR_HEIGHT = 56;
 const TIME_GUTTER = 52;
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const MIN_LABEL_HEIGHT = 18;
@@ -14,6 +15,19 @@ function formatHour(h: number): string {
   if (h < 12) return `${h} AM`;
   if (h === 12) return '12 PM';
   return `${h - 12} PM`;
+}
+
+function formatTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatElapsedHuman(ms: number): string {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function addDays(base: Date, n: number): Date {
@@ -51,7 +65,13 @@ interface Props {
 export default function StorageTab({ onSwitchTab }: Props) {
   const [mode, setMode] = useState<ViewMode>('1week');
   const [offset, setOffset] = useState(0);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('calendar');
   const [entries, setEntries] = useState<Record<string, EntryRow[]>>({});
+  const [visibleMinutes, setVisibleMinutes] = useState(720); // 12h default
+  const [gridHeight, setGridHeight] = useState(0);
+
+  // hourHeight is derived: fill the visible grid area with visibleMinutes worth of time
+  const hourHeight = gridHeight > 0 ? (gridHeight * 60) / visibleMinutes : DEFAULT_HOUR_HEIGHT;
 
   useEffect(() => {
     console.log('[BED] All DB entries:', getAllEntries());
@@ -85,6 +105,10 @@ export default function StorageTab({ onSwitchTab }: Props) {
   }, []);
 
   const days = useMemo(() => {
+    if (displayMode === 'list') {
+      return [addDays(today, offset)];
+    }
+
     let pageStart: Date;
     let daysCount: number;
 
@@ -102,7 +126,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
     }
 
     return Array.from({ length: daysCount }, (_, i) => addDays(pageStart, i));
-  }, [today, mode, offset]);
+  }, [today, mode, offset, displayMode]);
 
   useEffect(() => {
     const result: Record<string, EntryRow[]> = {};
@@ -113,20 +137,36 @@ export default function StorageTab({ onSwitchTab }: Props) {
     setEntries(result);
   }, [days]);
 
+  function toggleDisplayMode() {
+    setOffset(0);
+    setDisplayMode(d => d === 'calendar' ? 'list' : 'calendar');
+  }
+
+  function zoomIn() {
+    setVisibleMinutes(m => Math.max(30, m - 30));
+  }
+
+  function zoomOut() {
+    setVisibleMinutes(m => Math.min(1440, m + 30));
+  }
+
+  const listDay = days[0];
+  const listEntries = entries[toDateKey(listDay)] ?? [];
+
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
       <View style={styles.navRow}>
         <TouchableOpacity style={styles.navBtn} onPress={() => setOffset(o => o - 1)}>
           <Text style={styles.navArrow}>‹</Text>
         </TouchableOpacity>
-        <Text style={styles.rangeLabel}>{rangeLabel(days, mode)}</Text>
+        <Text style={styles.rangeLabel}>{rangeLabel(days, displayMode === 'list' ? '1day' : mode)}</Text>
         <TouchableOpacity style={styles.navBtn} onPress={() => setOffset(o => o + 1)}>
           <Text style={styles.navArrow}>›</Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.modeRow}>
-        {(['1day', '3days', '1week'] as ViewMode[]).map(m => (
+        {displayMode === 'calendar' && (['1day', '3days', '1week'] as ViewMode[]).map(m => (
           <TouchableOpacity
             key={m}
             style={[styles.modeBtn, mode === m && styles.modeBtnOn]}
@@ -137,10 +177,33 @@ export default function StorageTab({ onSwitchTab }: Props) {
             </Text>
           </TouchableOpacity>
         ))}
+        {displayMode === 'calendar' && (
+          <View style={styles.zoomBtns}>
+            <TouchableOpacity
+              style={[styles.zoomBtn, visibleMinutes >= 1440 && styles.zoomBtnDisabled]}
+              onPress={zoomOut}
+              disabled={visibleMinutes >= 1440}
+            >
+              <Text style={styles.zoomBtnText}>−</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.zoomBtn, visibleMinutes <= 30 && styles.zoomBtnDisabled]}
+              onPress={zoomIn}
+              disabled={visibleMinutes <= 30}
+            >
+              <Text style={styles.zoomBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        <TouchableOpacity style={[styles.modeBtn, styles.modeBtnOn]} onPress={toggleDisplayMode}>
+          <Text style={styles.modeBtnTextOn}>
+            {displayMode === 'calendar' ? 'List View' : 'Calendar View'}
+          </Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.dayHeaderRow}>
-        <View style={{ width: TIME_GUTTER }} />
+        {displayMode === 'calendar' && <View style={{ width: TIME_GUTTER }} />}
         {days.map((d, i) => {
           const isToday = isSameDay(d, new Date());
           return (
@@ -158,49 +221,70 @@ export default function StorageTab({ onSwitchTab }: Props) {
         })}
       </View>
 
-      <ScrollView style={styles.grid} showsVerticalScrollIndicator={false}>
-        <View style={{ height: 24 * HOUR_HEIGHT, flexDirection: 'row' }}>
-          {/* Time gutter */}
-          <View style={{ width: TIME_GUTTER }}>
-            {HOURS.map(h => (
-              <View key={h} style={styles.gutterCell}>
-                {h > 0 && <Text style={styles.timeLabel}>{formatHour(h)}</Text>}
-              </View>
-            ))}
+      {displayMode === 'calendar' ? (
+        <ScrollView
+          style={styles.grid}
+          showsVerticalScrollIndicator={false}
+          onLayout={e => setGridHeight(e.nativeEvent.layout.height)}
+        >
+          <View style={{ height: 24 * hourHeight, flexDirection: 'row' }}>
+            <View style={{ width: TIME_GUTTER }}>
+              {HOURS.map(h => (
+                <View key={h} style={{ height: hourHeight, alignItems: 'flex-end', paddingRight: 6 }}>
+                  {h > 0 && <Text style={styles.timeLabel}>{formatHour(h)}</Text>}
+                </View>
+              ))}
+            </View>
+            {days.map((day, di) => {
+              const dateKey = toDateKey(day);
+              const dayEntries = entries[dateKey] ?? [];
+              return (
+                <View key={di} style={[styles.dayColumn, di > 0 && styles.dayColumnBorder]}>
+                  {HOURS.map(h => (
+                    <View key={h} style={{ height: hourHeight, borderTopWidth: 1, borderTopColor: '#e8eaed' }} />
+                  ))}
+                  {dayEntries.map(entry => {
+                    const d = new Date(entry.start_ms);
+                    const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+                    const top = ((entry.start_ms - startOfDay) / 3600000) * hourHeight;
+                    const height = (entry.elapsed_ms / 3600000) * hourHeight;
+                    return (
+                      <View
+                        key={entry.id}
+                        style={[styles.entryBlock, { top, height, backgroundColor: entry.category_color }]}
+                      >
+                        {height >= MIN_LABEL_HEIGHT && (
+                          <Text style={styles.entryText} numberOfLines={1}>
+                            {entry.category_name}
+                          </Text>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            })}
           </View>
-
-          {/* Day columns with hour lines + entry blocks */}
-          {days.map((day, di) => {
-            const dateKey = toDateKey(day);
-            const dayEntries = entries[dateKey] ?? [];
-            return (
-              <View key={di} style={[styles.dayColumn, di > 0 && styles.dayColumnBorder]}>
-                {HOURS.map(h => (
-                  <View key={h} style={styles.hourLine} />
-                ))}
-                {dayEntries.map(entry => {
-                  const d = new Date(entry.start_ms);
-                  const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-                  const top = ((entry.start_ms - startOfDay) / 3600000) * HOUR_HEIGHT;
-                  const height = (entry.elapsed_ms / 3600000) * HOUR_HEIGHT;
-                  return (
-                    <View
-                      key={entry.id}
-                      style={[styles.entryBlock, { top, height, backgroundColor: entry.category_color }]}
-                    >
-                      {height >= MIN_LABEL_HEIGHT && (
-                        <Text style={styles.entryText} numberOfLines={1}>
-                          {entry.category_name}
-                        </Text>
-                      )}
-                    </View>
-                  );
-                })}
+        </ScrollView>
+      ) : (
+        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+          {listEntries.length === 0 ? (
+            <Text style={styles.emptyText}>No entries for this day</Text>
+          ) : (
+            listEntries.map(entry => (
+              <View key={entry.id} style={[styles.listCard, { backgroundColor: entry.category_color }]}>
+                <Text style={styles.listCardTitle}>{entry.category_name}</Text>
+                <View style={styles.listCardRow}>
+                  <Text style={styles.listCardTime}>
+                    {formatTime(entry.start_ms)} → {formatTime(entry.end_ms)}
+                  </Text>
+                  <Text style={styles.listCardElapsed}>{formatElapsedHuman(entry.elapsed_ms)}</Text>
+                </View>
               </View>
-            );
-          })}
-        </View>
-      </ScrollView>
+            ))
+          )}
+        </ScrollView>
+      )}
     </View>
   );
 }
@@ -235,6 +319,7 @@ const styles = StyleSheet.create({
   modeRow: {
     flexDirection: 'row',
     justifyContent: 'center',
+    alignItems: 'center',
     gap: 8,
     marginBottom: 12,
   },
@@ -256,6 +341,28 @@ const styles = StyleSheet.create({
   modeBtnTextOn: {
     color: '#fff',
     fontWeight: '600',
+    fontSize: 13,
+  },
+  zoomBtns: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  zoomBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: '#dadce0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomBtnDisabled: {
+    opacity: 0.3,
+  },
+  zoomBtnText: {
+    fontSize: 18,
+    color: '#444',
+    lineHeight: 22,
   },
   dayHeaderRow: {
     flexDirection: 'row',
@@ -298,11 +405,6 @@ const styles = StyleSheet.create({
   grid: {
     flex: 1,
   },
-  gutterCell: {
-    height: HOUR_HEIGHT,
-    alignItems: 'flex-end',
-    paddingRight: 6,
-  },
   timeLabel: {
     fontSize: 10,
     color: '#70757a',
@@ -314,11 +416,6 @@ const styles = StyleSheet.create({
   dayColumnBorder: {
     borderLeftWidth: 1,
     borderLeftColor: '#e8eaed',
-  },
-  hourLine: {
-    height: HOUR_HEIGHT,
-    borderTopWidth: 1,
-    borderTopColor: '#e8eaed',
   },
   entryBlock: {
     position: 'absolute',
@@ -333,5 +430,40 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 10,
     fontWeight: '600',
+  },
+  listContent: {
+    padding: 16,
+    gap: 10,
+  },
+  listCard: {
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+  },
+  listCardTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  listCardRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  listCardTime: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 13,
+  },
+  listCardElapsed: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  emptyText: {
+    textAlign: 'center',
+    color: '#aaa',
+    fontSize: 15,
+    marginTop: 48,
   },
 });
