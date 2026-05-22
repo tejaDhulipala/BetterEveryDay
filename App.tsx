@@ -16,35 +16,17 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import StorageTab from './StorageTab';
+import { getCategories, insertCategory, updateCategory, deactivateCategory, saveEntry } from './database';
 
-const STORAGE_KEY = 'bed_categories';
+const LEGACY_STORAGE_KEY = 'bed_categories';
 
 const PALETTE = [
   '#e74c3c', '#e67e22', '#f39c12', '#2ecc71', '#1abc9c',
   '#3498db', '#9b59b6', '#e91e63', '#ff5722', '#00bcd4',
 ];
 
-type Category = { name: string; color: string; description: string };
+type Category = { id: number; name: string; color: string; description: string };
 type Tab = 'tracking' | 'storage';
-
-async function persist(categories: Category[]): Promise<void> {
-  await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(categories));
-}
-
-async function load(): Promise<Category[]> {
-  const raw = await SecureStore.getItemAsync(STORAGE_KEY);
-  if (!raw) return [];
-  const parsed: unknown[] = JSON.parse(raw);
-  if (parsed.length > 0 && typeof parsed[0] === 'string') {
-    await SecureStore.deleteItemAsync(STORAGE_KEY);
-    return [];
-  }
-  return (parsed as Partial<Category>[]).map((c) => ({
-    name: c.name ?? '',
-    color: c.color ?? PALETTE[0],
-    description: c.description ?? '',
-  }));
-}
 
 function getEasternTime(): string {
   return new Date().toLocaleTimeString('en-US', {
@@ -77,6 +59,8 @@ export default function App() {
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startRef = useRef<number>(0);
+  const pauseTimeRef = useRef<number>(0);
+  const runCategoryRef = useRef<Category | null>(null);
 
   const trackingPan = useRef(
     PanResponder.create({
@@ -98,10 +82,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    load().then(cats => {
+    async function init() {
+      // One-time migration from SecureStore
+      const raw = await SecureStore.getItemAsync(LEGACY_STORAGE_KEY);
+      if (raw) {
+        const parsed: unknown[] = JSON.parse(raw);
+        if (parsed.length > 0 && typeof parsed[0] !== 'string') {
+          for (const c of parsed as Partial<{ name: string; color: string; description: string }>[]) {
+            insertCategory(c.name ?? '', c.color ?? PALETTE[0], c.description ?? '');
+          }
+        }
+        await SecureStore.deleteItemAsync(LEGACY_STORAGE_KEY);
+      }
+
+      const cats = getCategories();
       setCategories(cats);
       if (cats.length > 0) setSelectedCategoryIndex(cats.length - 1);
-    });
+    }
+    init();
   }, []);
 
   function openAdd() {
@@ -125,32 +123,32 @@ export default function App() {
     setEditingIndex(null);
   }
 
-  async function handleSave() {
+  function handleSave() {
     const name = inputName.trim();
     if (!name) return;
 
     let updated: Category[];
     if (editingIndex === null) {
       const color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-      updated = [...categories, { name, color, description: inputDescription.trim() }];
+      const id = insertCategory(name, color, inputDescription.trim());
+      updated = [...categories, { id, name, color, description: inputDescription.trim() }];
     } else {
-      updated = categories.map((cat, i) =>
-        i === editingIndex
-          ? { ...cat, name, description: inputDescription.trim() }
-          : cat
+      const cat = categories[editingIndex];
+      updateCategory(cat.id, name, inputDescription.trim());
+      updated = categories.map((c, i) =>
+        i === editingIndex ? { ...c, name, description: inputDescription.trim() } : c
       );
     }
 
     setCategories(updated);
-    await persist(updated);
     if (editingIndex === null) setSelectedCategoryIndex(updated.length - 1);
     closeModal();
   }
 
-  async function handleDelete(index: number) {
+  function handleDelete(index: number) {
+    deactivateCategory(categories[index].id);
     const updated = categories.filter((_, i) => i !== index);
     setCategories(updated);
-    await persist(updated);
     if (updated.length === 0) {
       setSelectedCategoryIndex(0);
     } else if (selectedCategoryIndex >= updated.length) {
@@ -159,7 +157,9 @@ export default function App() {
   }
 
   function handleStart() {
-    startRef.current = Date.now();
+    const now = Date.now();
+    startRef.current = now;
+    runCategoryRef.current = categories[selectedCategoryIndex] ?? null;
     intervalRef.current = setInterval(() => {
       setElapsed(Date.now() - startRef.current);
     }, 10);
@@ -169,12 +169,24 @@ export default function App() {
   function handlePause() {
     clearInterval(intervalRef.current!);
     intervalRef.current = null;
+    pauseTimeRef.current = Date.now();
     setAppState('paused');
   }
 
   function handleNewActivity() {
+    const cat = runCategoryRef.current;
+    if (cat) {
+      saveEntry({
+        categoryId: cat.id,
+        title: '',
+        startMs: startRef.current,
+        endMs: pauseTimeRef.current,
+        elapsedMs: pauseTimeRef.current - startRef.current,
+      });
+    }
     const now = Date.now();
     startRef.current = now;
+    runCategoryRef.current = categories[selectedCategoryIndex] ?? null;
     setElapsed(0);
     intervalRef.current = setInterval(() => {
       setElapsed(Date.now() - startRef.current);
@@ -203,7 +215,7 @@ export default function App() {
               .reverse()
               .map(({ cat, originalIndex }) => (
                 <TouchableOpacity
-                  key={originalIndex}
+                  key={cat.id}
                   activeOpacity={0.85}
                   onPress={appState !== 'running' ? () => setSelectedCategoryIndex(originalIndex) : undefined}
                   style={[

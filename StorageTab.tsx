@@ -1,11 +1,13 @@
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Dimensions, PanResponder, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { getEntriesByDate, getAllEntries, EntryRow } from './database';
 
 type ViewMode = '1day' | '3days' | '1week';
 
 const HOUR_HEIGHT = 56;
 const TIME_GUTTER = 52;
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
+const MIN_LABEL_HEIGHT = 18;
 
 function formatHour(h: number): string {
   if (h === 0) return '';
@@ -38,6 +40,10 @@ function rangeLabel(days: Date[], mode: ViewMode): string {
   return `${start} – ${end}`;
 }
 
+function toDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 interface Props {
   onSwitchTab: () => void;
 }
@@ -45,14 +51,17 @@ interface Props {
 export default function StorageTab({ onSwitchTab }: Props) {
   const [mode, setMode] = useState<ViewMode>('1week');
   const [offset, setOffset] = useState(0);
+  const [entries, setEntries] = useState<Record<string, EntryRow[]>>({});
 
-  // Keep a ref so the PanResponder (created once) always calls the latest callback
+  useEffect(() => {
+    console.log('[BED] All DB entries:', getAllEntries());
+  }, []);
+
   const onSwitchTabRef = useRef(onSwitchTab);
   onSwitchTabRef.current = onSwitchTab;
 
   const panResponder = useRef(
     PanResponder.create({
-      // Only activate for predominantly horizontal swipes
       onMoveShouldSetPanResponder: (_, gs) =>
         Math.abs(gs.dx) > 15 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
       onPanResponderRelease: (_, gs) => {
@@ -60,41 +69,52 @@ export default function StorageTab({ onSwitchTab }: Props) {
         const startY = gs.y0;
         const screenH = Dimensions.get('window').height;
         if (startY < screenH * 0.75) {
-          // Top 3/4: navigate calendar (swipe left = forward, right = back)
           if (gs.dx < 0) setOffset(o => o + 1);
           else setOffset(o => o - 1);
         } else {
-          // Bottom 1/4: switch tabs
           onSwitchTabRef.current();
         }
       },
     })
   ).current;
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, []);
 
-  let pageStart: Date;
-  let daysCount: number;
+  const days = useMemo(() => {
+    let pageStart: Date;
+    let daysCount: number;
 
-  if (mode === '1day') {
-    daysCount = 1;
-    pageStart = addDays(today, offset);
-  } else if (mode === '3days') {
-    daysCount = 3;
-    pageStart = addDays(today, offset * 3);
-  } else {
-    daysCount = 7;
-    const dow = today.getDay();
-    const toMonday = dow === 0 ? -6 : 1 - dow;
-    pageStart = addDays(today, toMonday + offset * 7);
-  }
+    if (mode === '1day') {
+      daysCount = 1;
+      pageStart = addDays(today, offset);
+    } else if (mode === '3days') {
+      daysCount = 3;
+      pageStart = addDays(today, offset * 3);
+    } else {
+      daysCount = 7;
+      const dow = today.getDay();
+      const toMonday = dow === 0 ? -6 : 1 - dow;
+      pageStart = addDays(today, toMonday + offset * 7);
+    }
 
-  const days = Array.from({ length: daysCount }, (_, i) => addDays(pageStart, i));
+    return Array.from({ length: daysCount }, (_, i) => addDays(pageStart, i));
+  }, [today, mode, offset]);
+
+  useEffect(() => {
+    const result: Record<string, EntryRow[]> = {};
+    for (const day of days) {
+      const key = toDateKey(day);
+      result[key] = getEntriesByDate(key);
+    }
+    setEntries(result);
+  }, [days]);
 
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
-      {/* Navigation row */}
       <View style={styles.navRow}>
         <TouchableOpacity style={styles.navBtn} onPress={() => setOffset(o => o - 1)}>
           <Text style={styles.navArrow}>‹</Text>
@@ -105,7 +125,6 @@ export default function StorageTab({ onSwitchTab }: Props) {
         </TouchableOpacity>
       </View>
 
-      {/* View mode buttons */}
       <View style={styles.modeRow}>
         {(['1day', '3days', '1week'] as ViewMode[]).map(m => (
           <TouchableOpacity
@@ -120,7 +139,6 @@ export default function StorageTab({ onSwitchTab }: Props) {
         ))}
       </View>
 
-      {/* Day name + number headers */}
       <View style={styles.dayHeaderRow}>
         <View style={{ width: TIME_GUTTER }} />
         {days.map((d, i) => {
@@ -140,21 +158,48 @@ export default function StorageTab({ onSwitchTab }: Props) {
         })}
       </View>
 
-      {/* Scrollable hour grid */}
       <ScrollView style={styles.grid} showsVerticalScrollIndicator={false}>
-        {HOURS.map(h => (
-          <View key={h} style={styles.hourRow}>
-            <View style={styles.timeGutter}>
-              {h > 0 && <Text style={styles.timeLabel}>{formatHour(h)}</Text>}
-            </View>
-            {days.map((_, di) => (
-              <View
-                key={di}
-                style={[styles.cell, di > 0 && styles.cellBorderLeft]}
-              />
+        <View style={{ height: 24 * HOUR_HEIGHT, flexDirection: 'row' }}>
+          {/* Time gutter */}
+          <View style={{ width: TIME_GUTTER }}>
+            {HOURS.map(h => (
+              <View key={h} style={styles.gutterCell}>
+                {h > 0 && <Text style={styles.timeLabel}>{formatHour(h)}</Text>}
+              </View>
             ))}
           </View>
-        ))}
+
+          {/* Day columns with hour lines + entry blocks */}
+          {days.map((day, di) => {
+            const dateKey = toDateKey(day);
+            const dayEntries = entries[dateKey] ?? [];
+            return (
+              <View key={di} style={[styles.dayColumn, di > 0 && styles.dayColumnBorder]}>
+                {HOURS.map(h => (
+                  <View key={h} style={styles.hourLine} />
+                ))}
+                {dayEntries.map(entry => {
+                  const d = new Date(entry.start_ms);
+                  const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+                  const top = ((entry.start_ms - startOfDay) / 3600000) * HOUR_HEIGHT;
+                  const height = (entry.elapsed_ms / 3600000) * HOUR_HEIGHT;
+                  return (
+                    <View
+                      key={entry.id}
+                      style={[styles.entryBlock, { top, height, backgroundColor: entry.category_color }]}
+                    >
+                      {height >= MIN_LABEL_HEIGHT && (
+                        <Text style={styles.entryText} numberOfLines={1}>
+                          {entry.category_name}
+                        </Text>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            );
+          })}
+        </View>
       </ScrollView>
     </View>
   );
@@ -253,12 +298,8 @@ const styles = StyleSheet.create({
   grid: {
     flex: 1,
   },
-  hourRow: {
-    flexDirection: 'row',
+  gutterCell: {
     height: HOUR_HEIGHT,
-  },
-  timeGutter: {
-    width: TIME_GUTTER,
     alignItems: 'flex-end',
     paddingRight: 6,
   },
@@ -267,13 +308,30 @@ const styles = StyleSheet.create({
     color: '#70757a',
     marginTop: -6,
   },
-  cell: {
+  dayColumn: {
     flex: 1,
+  },
+  dayColumnBorder: {
+    borderLeftWidth: 1,
+    borderLeftColor: '#e8eaed',
+  },
+  hourLine: {
+    height: HOUR_HEIGHT,
     borderTopWidth: 1,
     borderTopColor: '#e8eaed',
   },
-  cellBorderLeft: {
-    borderLeftWidth: 1,
-    borderLeftColor: '#e8eaed',
+  entryBlock: {
+    position: 'absolute',
+    left: 2,
+    right: 2,
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    paddingVertical: 2,
+    overflow: 'hidden',
+  },
+  entryText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '600',
   },
 });
