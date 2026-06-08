@@ -111,3 +111,18 @@ export function getEntriesByDate(date: string): EntryRow[] {
 export function getAllEntries(): EntryRow[] {
   return db.getAllSync<EntryRow>(`${ENTRY_SELECT} ORDER BY e.start_ms DESC`);
 }
+
+export function updateEntry(id: number, startMs: number, endMs: number): void {
+  db.runSync(
+    'UPDATE entries SET start_ms=?, end_ms=?, elapsed_ms=?, date=? WHERE id=?',
+    startMs,
+    endMs,
+    endMs - startMs,
+    toDateString(startMs),
+    id,
+  );
+}
+
+export function deleteEntry(id: number): void {
+  db.runSync('DELETE FROM entries WHERE id=?', id);
+}

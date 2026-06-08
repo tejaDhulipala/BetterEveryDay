@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Dimensions, PanResponder, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { getEntriesByDate, getAllEntries, EntryRow } from './database';
+import {
+  Alert,
+  Dimensions,
+  KeyboardAvoidingView,
+  Modal,
+  PanResponder,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  ToastAndroid,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { getEntriesByDate, getAllEntries, getCategories, saveEntry, updateEntry, deleteEntry, EntryRow, CategoryRow } from './database';
 
 type ViewMode = '1day' | '3days' | '1week';
 type DisplayMode = 'calendar' | 'list';
@@ -58,6 +72,34 @@ function toDateKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function findOverlappingIds(entries: EntryRow[]): Set<number> {
+  const overlapping = new Set<number>();
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const a = entries[i], b = entries[j];
+      if (a.start_ms < b.end_ms && b.start_ms < a.end_ms) {
+        overlapping.add(a.id);
+        overlapping.add(b.id);
+      }
+    }
+  }
+  return overlapping;
+}
+
+// Parses "2:34 PM" relative to the start of a given day (epoch ms).
+// Returns null if the input is invalid.
+function parseTimeInput(input: string, startOfDay: number): number | null {
+  const match = input.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const period = match[3].toUpperCase();
+  if (h < 1 || h > 12 || m < 0 || m > 59) return null;
+  if (period === 'AM') { if (h === 12) h = 0; }
+  else { if (h !== 12) h += 12; }
+  return startOfDay + h * 3600000 + m * 60000;
+}
+
 interface Props {
   onSwitchTab: () => void;
 }
@@ -67,13 +109,26 @@ export default function StorageTab({ onSwitchTab }: Props) {
   const [offset, setOffset] = useState(0);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('calendar');
   const [entries, setEntries] = useState<Record<string, EntryRow[]>>({});
-  const [visibleMinutes, setVisibleMinutes] = useState(720); // 12h default
+  const [visibleMinutes, setVisibleMinutes] = useState(720);
   const [gridHeight, setGridHeight] = useState(0);
 
-  // hourHeight is derived: fill the visible grid area with visibleMinutes worth of time
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+
+  const [editingEntry, setEditingEntry] = useState<EntryRow | null>(null);
+  const [editStartInput, setEditStartInput] = useState('');
+  const [editEndInput, setEditEndInput] = useState('');
+  const [editError, setEditError] = useState('');
+
+  const [addModalVisible, setAddModalVisible] = useState(false);
+  const [addCategoryId, setAddCategoryId] = useState<number | null>(null);
+  const [addStartInput, setAddStartInput] = useState('');
+  const [addEndInput, setAddEndInput] = useState('');
+  const [addError, setAddError] = useState('');
+
   const hourHeight = gridHeight > 0 ? (gridHeight * 60) / visibleMinutes : DEFAULT_HOUR_HEIGHT;
 
   useEffect(() => {
+    setCategories(getCategories());
     console.log('[BED] All DB entries:', getAllEntries());
   }, []);
 
@@ -108,10 +163,8 @@ export default function StorageTab({ onSwitchTab }: Props) {
     if (displayMode === 'list') {
       return [addDays(today, offset)];
     }
-
     let pageStart: Date;
     let daysCount: number;
-
     if (mode === '1day') {
       daysCount = 1;
       pageStart = addDays(today, offset);
@@ -124,18 +177,34 @@ export default function StorageTab({ onSwitchTab }: Props) {
       const toMonday = dow === 0 ? -6 : 1 - dow;
       pageStart = addDays(today, toMonday + offset * 7);
     }
-
     return Array.from({ length: daysCount }, (_, i) => addDays(pageStart, i));
   }, [today, mode, offset, displayMode]);
 
-  useEffect(() => {
+  function refreshEntries() {
     const result: Record<string, EntryRow[]> = {};
     for (const day of days) {
       const key = toDateKey(day);
       result[key] = getEntriesByDate(key);
     }
     setEntries(result);
-  }, [days]);
+  }
+
+  useEffect(() => {
+    const result: Record<string, EntryRow[]> = {};
+    let hasOverlaps = false;
+    for (const day of days) {
+      const key = toDateKey(day);
+      const dayEntries = getEntriesByDate(key);
+      result[key] = dayEntries;
+      if (displayMode === 'list' && findOverlappingIds(dayEntries).size > 0) {
+        hasOverlaps = true;
+      }
+    }
+    setEntries(result);
+    if (hasOverlaps && Platform.OS === 'android') {
+      ToastAndroid.show('Some entries overlap on this day', ToastAndroid.SHORT);
+    }
+  }, [days, displayMode]);
 
   function toggleDisplayMode() {
     setOffset(0);
@@ -150,8 +219,85 @@ export default function StorageTab({ onSwitchTab }: Props) {
     setVisibleMinutes(m => Math.min(1440, m + 30));
   }
 
+  function openEditModal(entry: EntryRow) {
+    setEditingEntry(entry);
+    setEditStartInput(formatTime(entry.start_ms));
+    setEditEndInput(formatTime(entry.end_ms));
+    setEditError('');
+  }
+
+  function handleSaveEdit() {
+    if (!editingEntry) return;
+    const d = new Date(editingEntry.start_ms);
+    const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const newStartMs = parseTimeInput(editStartInput, startOfDay);
+    const newEndMs = parseTimeInput(editEndInput, startOfDay);
+    if (newStartMs === null || newEndMs === null) {
+      setEditError('Invalid format — use "2:34 PM"');
+      return;
+    }
+    if (newEndMs <= newStartMs) {
+      setEditError('End time must be after start time');
+      return;
+    }
+    updateEntry(editingEntry.id, newStartMs, newEndMs);
+    setEditingEntry(null);
+    refreshEntries();
+  }
+
+  function openAddModal() {
+    setAddCategoryId(categories.length > 0 ? categories[0].id : null);
+    setAddStartInput('');
+    setAddEndInput('');
+    setAddError('');
+    setAddModalVisible(true);
+  }
+
+  function handleAddEntry() {
+    if (addCategoryId === null) {
+      setAddError('Select a category');
+      return;
+    }
+    const startOfDay = listDay.getTime();
+    const newStartMs = parseTimeInput(addStartInput, startOfDay);
+    const newEndMs = parseTimeInput(addEndInput, startOfDay);
+    if (newStartMs === null || newEndMs === null) {
+      setAddError('Invalid format — use "2:34 PM"');
+      return;
+    }
+    if (newEndMs <= newStartMs) {
+      setAddError('End time must be after start time');
+      return;
+    }
+    const cat = categories.find(c => c.id === addCategoryId)!;
+    saveEntry({ categoryId: cat.id, title: '', startMs: newStartMs, endMs: newEndMs, elapsedMs: newEndMs - newStartMs });
+    setAddModalVisible(false);
+    refreshEntries();
+  }
+
+  function handleDeleteEntry() {
+    if (!editingEntry) return;
+    Alert.alert(
+      'Delete entry?',
+      `${editingEntry.category_name} · ${formatTime(editingEntry.start_ms)} – ${formatTime(editingEntry.end_ms)}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            deleteEntry(editingEntry.id);
+            setEditingEntry(null);
+            refreshEntries();
+          },
+        },
+      ],
+    );
+  }
+
   const listDay = days[0];
   const listEntries = entries[toDateKey(listDay)] ?? [];
+  const overlappingIds = findOverlappingIds(listEntries);
 
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
@@ -267,24 +413,145 @@ export default function StorageTab({ onSwitchTab }: Props) {
           </View>
         </ScrollView>
       ) : (
-        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
-          {listEntries.length === 0 ? (
-            <Text style={styles.emptyText}>No entries for this day</Text>
-          ) : (
-            listEntries.map(entry => (
-              <View key={entry.id} style={[styles.listCard, { backgroundColor: entry.category_color }]}>
-                <Text style={styles.listCardTitle}>{entry.category_name}</Text>
-                <View style={styles.listCardRow}>
-                  <Text style={styles.listCardTime}>
-                    {formatTime(entry.start_ms)} → {formatTime(entry.end_ms)}
-                  </Text>
-                  <Text style={styles.listCardElapsed}>{formatElapsedHuman(entry.elapsed_ms)}</Text>
-                </View>
-              </View>
-            ))
-          )}
-        </ScrollView>
+        <View style={styles.listContainer}>
+          <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+            {listEntries.length === 0 ? (
+              <Text style={styles.emptyText}>No entries for this day</Text>
+            ) : (
+              listEntries.map(entry => (
+                <TouchableOpacity
+                  key={entry.id}
+                  activeOpacity={0.8}
+                  onPress={() => openEditModal(entry)}
+                  style={[styles.listCard, { backgroundColor: entry.category_color }]}
+                >
+                  {overlappingIds.has(entry.id) && (
+                    <View style={styles.overlapBadge}>
+                      <Text style={styles.overlapBadgeText}>!</Text>
+                    </View>
+                  )}
+                  <Text style={styles.listCardTitle}>{entry.category_name}</Text>
+                  <View style={styles.listCardRow}>
+                    <Text style={styles.listCardTime}>
+                      {formatTime(entry.start_ms)} → {formatTime(entry.end_ms)}
+                    </Text>
+                    <Text style={styles.listCardElapsed}>{formatElapsedHuman(entry.elapsed_ms)}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+          </ScrollView>
+          <TouchableOpacity style={styles.fab} onPress={openAddModal}>
+            <Text style={styles.fabText}>＋</Text>
+          </TouchableOpacity>
+        </View>
       )}
+
+      <Modal visible={addModalVisible} transparent animationType="fade">
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Add Entry</Text>
+
+            <Text style={styles.modalLabel}>Category</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryScroll}>
+              {categories.map(cat => (
+                <TouchableOpacity
+                  key={cat.id}
+                  onPress={() => setAddCategoryId(cat.id)}
+                  style={[
+                    styles.categoryPill,
+                    { backgroundColor: cat.color },
+                    addCategoryId === cat.id && styles.categoryPillSelected,
+                  ]}
+                >
+                  <Text style={styles.categoryPillText}>{cat.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.modalLabel}>Start Time</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={addStartInput}
+              onChangeText={t => { setAddStartInput(t); setAddError(''); }}
+              placeholder="e.g. 2:34 PM"
+              autoCapitalize="characters"
+            />
+
+            <Text style={styles.modalLabel}>End Time</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={addEndInput}
+              onChangeText={t => { setAddEndInput(t); setAddError(''); }}
+              placeholder="e.g. 3:15 PM"
+              autoCapitalize="characters"
+            />
+
+            {addError ? <Text style={styles.editError}>{addError}</Text> : null}
+
+            <View style={styles.modalBtnRow}>
+              <View style={styles.modalBtnRight}>
+                <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setAddModalVisible(false)}>
+                  <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.modalBtnSave} onPress={handleAddEntry}>
+                  <Text style={styles.modalBtnSaveText}>Add</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={editingEntry !== null} transparent animationType="fade">
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.modalCard}>
+            <View style={[styles.categoryPill, { backgroundColor: editingEntry?.category_color }]}>
+              <Text style={styles.categoryPillText}>{editingEntry?.category_name}</Text>
+            </View>
+
+            <Text style={styles.modalLabel}>Start Time</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editStartInput}
+              onChangeText={t => { setEditStartInput(t); setEditError(''); }}
+              placeholder="e.g. 2:34 PM"
+              autoCapitalize="characters"
+            />
+
+            <Text style={styles.modalLabel}>End Time</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editEndInput}
+              onChangeText={t => { setEditEndInput(t); setEditError(''); }}
+              placeholder="e.g. 3:15 PM"
+              autoCapitalize="characters"
+            />
+
+            {editError ? <Text style={styles.editError}>{editError}</Text> : null}
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity style={styles.modalBtnDelete} onPress={handleDeleteEntry}>
+                <Text style={styles.modalBtnDeleteText}>Delete</Text>
+              </TouchableOpacity>
+              <View style={styles.modalBtnRight}>
+                <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setEditingEntry(null)}>
+                  <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.modalBtnSave} onPress={handleSaveEdit}>
+                  <Text style={styles.modalBtnSaveText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -465,5 +732,141 @@ const styles = StyleSheet.create({
     color: '#aaa',
     fontSize: 15,
     marginTop: 48,
+  },
+  overlapBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  overlapBadgeText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#e74c3c',
+    lineHeight: 16,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 20,
+    width: '82%',
+    gap: 10,
+  },
+  categoryPill: {
+    alignSelf: 'flex-start',
+    borderRadius: 12,
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    marginBottom: 4,
+  },
+  categoryPillText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  modalLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#70757a',
+    marginBottom: -4,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#dadce0',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 16,
+    color: '#202124',
+  },
+  editError: {
+    fontSize: 12,
+    color: '#e74c3c',
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  modalBtnDelete: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e74c3c',
+  },
+  modalBtnDeleteText: {
+    color: '#e74c3c',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalBtnRight: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  modalBtnCancel: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  modalBtnCancelText: {
+    color: '#70757a',
+    fontSize: 14,
+  },
+  modalBtnSave: {
+    backgroundColor: '#1a6bcc',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  modalBtnSaveText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  listContainer: {
+    flex: 1,
+  },
+  fab: {
+    position: 'absolute',
+    right: 20,
+    bottom: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#1a6bcc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+  },
+  fabText: {
+    color: '#fff',
+    fontSize: 28,
+    lineHeight: 32,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#202124',
+    marginBottom: 4,
+  },
+  categoryScroll: {
+    marginBottom: 4,
+  },
+  categoryPillSelected: {
+    borderWidth: 2.5,
+    borderColor: '#fff',
   },
 });
