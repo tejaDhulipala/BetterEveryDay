@@ -25,6 +25,125 @@ db.execSync(`
   );
 `);
 
+db.execSync(`
+  CREATE TABLE IF NOT EXISTS habits (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                     TEXT    NOT NULL,
+    is_active                INTEGER NOT NULL DEFAULT 1,
+    created_tracking_date    TEXT    NOT NULL,
+    deactivated_tracking_date TEXT
+  );
+`);
+
+db.execSync(`
+  CREATE TABLE IF NOT EXISTS habit_entries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    date          TEXT    NOT NULL,
+    tracking_date TEXT    NOT NULL,
+    habit_id      INTEGER NOT NULL REFERENCES habits(id),
+    completed     INTEGER NOT NULL DEFAULT 0,
+    excused       INTEGER NOT NULL DEFAULT 0
+  );
+`);
+
+export interface HabitRow {
+  id: number;
+  name: string;
+  is_active: number;
+  created_tracking_date: string;
+  deactivated_tracking_date: string | null;
+}
+
+export interface HabitEntryRow {
+  id: number;
+  date: string;
+  tracking_date: string;
+  habit_id: number;
+  completed: number;
+  excused: number;
+}
+
+export function getHabits(): HabitRow[] {
+  return db.getAllSync<HabitRow>('SELECT * FROM habits WHERE is_active = 1 ORDER BY id ASC');
+}
+
+export function insertHabit(name: string, createdTrackingDate: string): number {
+  const result = db.runSync(
+    'INSERT INTO habits (name, created_tracking_date) VALUES (?, ?)',
+    name,
+    createdTrackingDate,
+  );
+  return result.lastInsertRowId;
+}
+
+export function updateHabitName(id: number, name: string): void {
+  db.runSync('UPDATE habits SET name = ? WHERE id = ?', name, id);
+}
+
+export function deactivateHabit(id: number, deactivatedTrackingDate: string): void {
+  db.runSync(
+    'UPDATE habits SET is_active = 0, deactivated_tracking_date = ? WHERE id = ?',
+    deactivatedTrackingDate,
+    id,
+  );
+}
+
+export function getHabitsActiveOnDate(trackingDate: string): HabitRow[] {
+  return db.getAllSync<HabitRow>(
+    `SELECT * FROM habits
+     WHERE created_tracking_date <= ?
+       AND (deactivated_tracking_date IS NULL OR deactivated_tracking_date > ?)
+     ORDER BY id ASC`,
+    trackingDate,
+    trackingDate,
+  );
+}
+
+export function getHabitEntriesByTrackingDate(trackingDate: string): HabitEntryRow[] {
+  return db.getAllSync<HabitEntryRow>(
+    'SELECT * FROM habit_entries WHERE tracking_date = ? ORDER BY habit_id ASC',
+    trackingDate,
+  );
+}
+
+export function upsertHabitEntry(habitId: number, trackingDate: string, calendarDate: string, completed: boolean): void {
+  const existing = db.getFirstSync<{ id: number }>(
+    'SELECT id FROM habit_entries WHERE habit_id = ? AND tracking_date = ?',
+    habitId,
+    trackingDate,
+  );
+  if (existing) {
+    db.runSync('UPDATE habit_entries SET completed = ?, excused = 0 WHERE id = ?', completed ? 1 : 0, existing.id);
+  } else {
+    db.runSync(
+      'INSERT INTO habit_entries (date, tracking_date, habit_id, completed, excused) VALUES (?, ?, ?, ?, 0)',
+      calendarDate,
+      trackingDate,
+      habitId,
+      completed ? 1 : 0,
+    );
+  }
+}
+
+export function upsertHabitExcused(habitId: number, trackingDate: string, calendarDate: string, excused: boolean): void {
+  const existing = db.getFirstSync<{ id: number }>(
+    'SELECT id FROM habit_entries WHERE habit_id = ? AND tracking_date = ?',
+    habitId,
+    trackingDate,
+  );
+  if (existing) {
+    db.runSync('UPDATE habit_entries SET excused = ?, completed = 0 WHERE id = ?', excused ? 1 : 0, existing.id);
+  } else {
+    db.runSync(
+      'INSERT INTO habit_entries (date, tracking_date, habit_id, completed, excused) VALUES (?, ?, ?, 0, ?)',
+      calendarDate,
+      trackingDate,
+      habitId,
+      excused ? 1 : 0,
+    );
+  }
+}
+
 export interface CategoryRow {
   id: number;
   name: string;

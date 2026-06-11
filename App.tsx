@@ -17,6 +17,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import StorageTab from './StorageTab';
 import AnalyticsTab from './AnalyticsTab';
+import HabitsTab from './HabitsTab';
 import { getCategories, insertCategory, updateCategory, deactivateCategory, saveEntry, TRACKING_CUTOFF_MS } from './database';
 
 const LEGACY_STORAGE_KEY = 'bed_categories';
@@ -27,7 +28,7 @@ const PALETTE = [
 ];
 
 type Category = { id: number; name: string; color: string; description: string };
-type Tab = 'tracking' | 'storage' | 'analytics';
+type Tab = 'tracking' | 'storage' | 'analytics' | 'habits';
 
 function getEasternTime(): string {
   return new Date().toLocaleTimeString('en-US', {
@@ -367,12 +368,14 @@ export default function App() {
         </KeyboardAvoidingView>
       ) : activeTab === 'storage' ? (
         <StorageTab onSwitchTab={() => setActiveTab('tracking')} onSwitchToAnalytics={() => setActiveTab('analytics')} />
+      ) : activeTab === 'analytics' ? (
+        <AnalyticsTab onSwitchTab={() => setActiveTab('storage')} onSwitchToHabits={() => setActiveTab('habits')} />
       ) : (
-        <AnalyticsTab onSwitchTab={() => setActiveTab('storage')} />
+        <HabitsTab onSwitchTab={() => setActiveTab('analytics')} />
       )}
 
       <View style={styles.tabBar}>
-        {(['tracking', 'storage', 'analytics'] as Tab[]).map(tab => (
+        {(['tracking', 'storage', 'analytics', 'habits'] as Tab[]).map(tab => (
           <TouchableOpacity
             key={tab}
             style={styles.tab}

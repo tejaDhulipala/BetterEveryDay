@@ -14,6 +14,7 @@ import { getEntriesForTrackingDateRange } from './database';
 
 interface Props {
   onSwitchTab: () => void;
+  onSwitchToHabits: () => void;
 }
 
 const SVG_SIZE = 280;
@@ -74,7 +75,7 @@ function slicePath(startAngle: number, endAngle: number): string {
   return `M ${CX} ${CY} L ${s.x} ${s.y} A ${R} ${R} 0 ${large} 1 ${e.x} ${e.y} Z`;
 }
 
-export default function AnalyticsTab({ onSwitchTab }: Props) {
+export default function AnalyticsTab({ onSwitchTab, onSwitchToHabits }: Props) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -92,6 +93,8 @@ export default function AnalyticsTab({ onSwitchTab }: Props) {
 
   const onSwitchTabRef = useRef(onSwitchTab);
   onSwitchTabRef.current = onSwitchTab;
+  const onSwitchToHabitsRef = useRef(onSwitchToHabits);
+  onSwitchToHabitsRef.current = onSwitchToHabits;
 
   const panResponder = useRef(
     PanResponder.create({
@@ -101,7 +104,8 @@ export default function AnalyticsTab({ onSwitchTab }: Props) {
         if (Math.abs(gs.dx) < 40) return;
         const screenH = Dimensions.get('window').height;
         if (gs.y0 >= screenH * 0.75) {
-          onSwitchTabRef.current();
+          if (gs.dx > 0) onSwitchTabRef.current();
+          else onSwitchToHabitsRef.current();
         }
       },
     })
