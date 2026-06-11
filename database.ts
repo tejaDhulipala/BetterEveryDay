@@ -10,15 +10,18 @@ db.execSync(`
     description TEXT    NOT NULL DEFAULT '',
     is_active   INTEGER NOT NULL DEFAULT 1
   );
+`);
 
+db.execSync(`
   CREATE TABLE IF NOT EXISTS entries (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT    NOT NULL,
-    category_id INTEGER NOT NULL REFERENCES categories(id),
-    title       TEXT    NOT NULL DEFAULT '',
-    start_ms    INTEGER NOT NULL,
-    end_ms      INTEGER NOT NULL,
-    elapsed_ms  INTEGER NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    date           TEXT    NOT NULL,
+    tracking_date  TEXT    NOT NULL,
+    category_id    INTEGER NOT NULL REFERENCES categories(id),
+    description    TEXT    NOT NULL DEFAULT '',
+    start_ms       INTEGER NOT NULL,
+    end_ms         INTEGER NOT NULL,
+    elapsed_ms     INTEGER NOT NULL
   );
 `);
 
@@ -32,7 +35,7 @@ export interface CategoryRow {
 
 export interface Entry {
   categoryId: number;
-  title: string;
+  description: string;
   startMs: number;
   endMs: number;
   elapsedMs: number;
@@ -41,10 +44,11 @@ export interface Entry {
 export interface EntryRow {
   id: number;
   date: string;
+  tracking_date: string;
   category_id: number;
   category_name: string;
   category_color: string;
-  title: string;
+  description: string;
   start_ms: number;
   end_ms: number;
   elapsed_ms: number;
@@ -53,6 +57,14 @@ export interface EntryRow {
 function toDateString(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export const TRACKING_CUTOFF_MS = (4 * 60 + 30) * 60 * 1000; // 4:30 AM
+
+function toTrackingDateString(ms: number): string {
+  const d = new Date(ms);
+  const msFromMidnight = (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) * 1000;
+  return toDateString(msFromMidnight < TRACKING_CUTOFF_MS ? ms - 86400000 : ms);
 }
 
 export function getCategories(): CategoryRow[] {
@@ -82,10 +94,11 @@ export function deactivateCategory(id: number): void {
 
 export function saveEntry(entry: Entry): void {
   db.runSync(
-    'INSERT INTO entries (date, category_id, title, start_ms, end_ms, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO entries (date, tracking_date, category_id, description, start_ms, end_ms, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
     toDateString(entry.startMs),
+    toTrackingDateString(entry.startMs),
     entry.categoryId,
-    entry.title,
+    entry.description,
     entry.startMs,
     entry.endMs,
     entry.elapsedMs,
@@ -93,10 +106,10 @@ export function saveEntry(entry: Entry): void {
 }
 
 const ENTRY_SELECT = `
-  SELECT e.id, e.date, e.category_id,
+  SELECT e.id, e.date, e.tracking_date, e.category_id,
     c.name  AS category_name,
     c.color AS category_color,
-    e.title, e.start_ms, e.end_ms, e.elapsed_ms
+    e.description, e.start_ms, e.end_ms, e.elapsed_ms
   FROM entries e
   JOIN categories c ON e.category_id = c.id
 `;
@@ -108,17 +121,34 @@ export function getEntriesByDate(date: string): EntryRow[] {
   );
 }
 
+export function getEntriesByTrackingDate(date: string): EntryRow[] {
+  return db.getAllSync<EntryRow>(
+    `${ENTRY_SELECT} WHERE e.tracking_date = ? ORDER BY e.start_ms ASC`,
+    date,
+  );
+}
+
+export function getEntriesForTrackingDateRange(startDate: string, endDate: string): EntryRow[] {
+  return db.getAllSync<EntryRow>(
+    `${ENTRY_SELECT} WHERE e.tracking_date >= ? AND e.tracking_date <= ? ORDER BY e.start_ms ASC`,
+    startDate,
+    endDate,
+  );
+}
+
 export function getAllEntries(): EntryRow[] {
   return db.getAllSync<EntryRow>(`${ENTRY_SELECT} ORDER BY e.start_ms DESC`);
 }
 
-export function updateEntry(id: number, startMs: number, endMs: number): void {
+export function updateEntry(id: number, startMs: number, endMs: number, description: string): void {
   db.runSync(
-    'UPDATE entries SET start_ms=?, end_ms=?, elapsed_ms=?, date=? WHERE id=?',
+    'UPDATE entries SET start_ms=?, end_ms=?, elapsed_ms=?, date=?, tracking_date=?, description=? WHERE id=?',
     startMs,
     endMs,
     endMs - startMs,
     toDateString(startMs),
+    toTrackingDateString(startMs),
+    description,
     id,
   );
 }

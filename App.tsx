@@ -16,7 +16,8 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import StorageTab from './StorageTab';
-import { getCategories, insertCategory, updateCategory, deactivateCategory, saveEntry } from './database';
+import AnalyticsTab from './AnalyticsTab';
+import { getCategories, insertCategory, updateCategory, deactivateCategory, saveEntry, TRACKING_CUTOFF_MS } from './database';
 
 const LEGACY_STORAGE_KEY = 'bed_categories';
 
@@ -26,7 +27,7 @@ const PALETTE = [
 ];
 
 type Category = { id: number; name: string; color: string; description: string };
-type Tab = 'tracking' | 'storage';
+type Tab = 'tracking' | 'storage' | 'analytics';
 
 function getEasternTime(): string {
   return new Date().toLocaleTimeString('en-US', {
@@ -36,6 +37,21 @@ function getEasternTime(): string {
     second: '2-digit',
   });
 }
+
+function getTrackingDateDisplay(): string {
+  const now = Date.now();
+  const d = new Date(now);
+  const msFromMidnight = (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) * 1000;
+  const trackingMs = msFromMidnight < TRACKING_CUTOFF_MS ? now - 86400000 : now;
+  return new Date(trackingMs).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+const CUTOFF_DISPLAY = (() => {
+  const totalMinutes = TRACKING_CUTOFF_MS / 60000;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}:${String(m).padStart(2, '0')} AM`;
+})();
 
 function formatElapsed(ms: number): string {
   const minutes = Math.floor(ms / 60000);
@@ -47,8 +63,10 @@ function formatElapsed(ms: number): string {
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('tracking');
   const [time, setTime] = useState(getEasternTime());
+  const [trackingDate, setTrackingDate] = useState(getTrackingDateDisplay());
   const [elapsed, setElapsed] = useState(0);
   const [appState, setAppState] = useState<'base' | 'running' | 'paused'>('base');
+  const [activityDescription, setActivityDescription] = useState('');
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategoryIndex, setSelectedCategoryIndex] = useState<number>(0);
@@ -77,7 +95,10 @@ export default function App() {
   ).current;
 
   useEffect(() => {
-    const id = setInterval(() => setTime(getEasternTime()), 1000);
+    const id = setInterval(() => {
+      setTime(getEasternTime());
+      setTrackingDate(getTrackingDateDisplay());
+    }, 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -178,12 +199,13 @@ export default function App() {
     if (cat) {
       saveEntry({
         categoryId: cat.id,
-        title: '',
+        description: activityDescription.trim(),
         startMs: startRef.current,
         endMs: pauseTimeRef.current,
         elapsedMs: pauseTimeRef.current - startRef.current,
       });
     }
+    setActivityDescription('');
     const now = Date.now();
     startRef.current = now;
     runCategoryRef.current = categories[selectedCategoryIndex] ?? null;
@@ -199,11 +221,15 @@ export default function App() {
       <StatusBar style={activeTab === 'tracking' ? 'light' : 'dark'} />
 
       {activeTab === 'tracking' ? (
-        <View
+        <KeyboardAvoidingView
           style={[styles.storageContainer, { backgroundColor: categories[selectedCategoryIndex]?.color ?? '#1a6bcc' }]}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           {...trackingPan.panHandlers}
         >
           <Text style={styles.clock}>{time} ET</Text>
+          <Text style={styles.cutoffLabel}>day changes at {CUTOFF_DISPLAY}</Text>
+
+          <Text style={styles.trackingDateLabel}>{trackingDate}</Text>
 
           <ScrollView
             style={styles.categoryScroll}
@@ -256,6 +282,16 @@ export default function App() {
 
           <Text style={styles.stopwatch}>{formatElapsed(elapsed)}</Text>
 
+          {appState === 'paused' && (
+            <TextInput
+              style={styles.activityInput}
+              placeholder="What did you work on?"
+              placeholderTextColor="rgba(255,255,255,0.5)"
+              value={activityDescription}
+              onChangeText={setActivityDescription}
+            />
+          )}
+
           <View style={styles.buttons}>
             {appState === 'base' && (
               <TouchableOpacity style={[styles.btn, styles.btnStart]} onPress={handleStart}>
@@ -263,7 +299,15 @@ export default function App() {
               </TouchableOpacity>
             )}
             {appState === 'running' && (
-              <TouchableOpacity style={[styles.btn, styles.btnPause]} onPress={handlePause}>
+              <TouchableOpacity
+                style={[styles.btn, styles.btnPause]}
+                onPress={() =>
+                  Alert.alert('Pause timer?', 'This will stop the current session.', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Pause', style: 'destructive', onPress: handlePause },
+                  ])
+                }
+              >
                 <Text style={styles.btnText}>Pause</Text>
               </TouchableOpacity>
             )}
@@ -320,13 +364,15 @@ export default function App() {
               </View>
             </KeyboardAvoidingView>
           </Modal>
-        </View>
+        </KeyboardAvoidingView>
+      ) : activeTab === 'storage' ? (
+        <StorageTab onSwitchTab={() => setActiveTab('tracking')} onSwitchToAnalytics={() => setActiveTab('analytics')} />
       ) : (
-        <StorageTab onSwitchTab={() => setActiveTab('tracking')} />
+        <AnalyticsTab onSwitchTab={() => setActiveTab('storage')} />
       )}
 
       <View style={styles.tabBar}>
-        {(['tracking', 'storage'] as Tab[]).map(tab => (
+        {(['tracking', 'storage', 'analytics'] as Tab[]).map(tab => (
           <TouchableOpacity
             key={tab}
             style={styles.tab}
@@ -386,6 +432,19 @@ const styles = StyleSheet.create({
     left: 20,
     fontSize: 14,
     color: '#c0d8f5',
+  },
+  cutoffLabel: {
+    position: 'absolute',
+    top: 60,
+    right: 20,
+    fontSize: 14,
+    color: '#c0d8f5',
+  },
+  trackingDateLabel: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#000000',
+    marginBottom: 12,
   },
   categoryScroll: {
     width: '80%',
@@ -500,6 +559,17 @@ const styles = StyleSheet.create({
   },
   btnReset: {
     backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  activityInput: {
+    width: '80%',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    fontSize: 15,
+    color: '#ffffff',
+    marginTop: 16,
+    marginBottom: 8,
   },
   btnText: {
     fontSize: 18,

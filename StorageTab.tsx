@@ -14,7 +14,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { getEntriesByDate, getAllEntries, getCategories, saveEntry, updateEntry, deleteEntry, EntryRow, CategoryRow } from './database';
+import { getEntriesByDate, getEntriesByTrackingDate, getAllEntries, getCategories, saveEntry, updateEntry, deleteEntry, EntryRow, CategoryRow, TRACKING_CUTOFF_MS } from './database';
+
+const totalMinutes = TRACKING_CUTOFF_MS / 60000;
+const CUTOFF_DISPLAY = `${Math.floor(totalMinutes / 60)}:${String(totalMinutes % 60).padStart(2, '0')} AM`;
 
 type ViewMode = '1day' | '3days' | '1week';
 type DisplayMode = 'calendar' | 'list';
@@ -23,6 +26,7 @@ const DEFAULT_HOUR_HEIGHT = 56;
 const TIME_GUTTER = 52;
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const MIN_LABEL_HEIGHT = 18;
+const MIN_DESCRIPTION_HEIGHT = 30;
 
 function formatHour(h: number): string {
   if (h === 0) return '';
@@ -102,9 +106,10 @@ function parseTimeInput(input: string, startOfDay: number): number | null {
 
 interface Props {
   onSwitchTab: () => void;
+  onSwitchToAnalytics: () => void;
 }
 
-export default function StorageTab({ onSwitchTab }: Props) {
+export default function StorageTab({ onSwitchTab, onSwitchToAnalytics }: Props) {
   const [mode, setMode] = useState<ViewMode>('1week');
   const [offset, setOffset] = useState(0);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('calendar');
@@ -117,12 +122,14 @@ export default function StorageTab({ onSwitchTab }: Props) {
   const [editingEntry, setEditingEntry] = useState<EntryRow | null>(null);
   const [editStartInput, setEditStartInput] = useState('');
   const [editEndInput, setEditEndInput] = useState('');
+  const [editDescriptionInput, setEditDescriptionInput] = useState('');
   const [editError, setEditError] = useState('');
 
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [addCategoryId, setAddCategoryId] = useState<number | null>(null);
   const [addStartInput, setAddStartInput] = useState('');
   const [addEndInput, setAddEndInput] = useState('');
+  const [addDescriptionInput, setAddDescriptionInput] = useState('');
   const [addError, setAddError] = useState('');
 
   const hourHeight = gridHeight > 0 ? (gridHeight * 60) / visibleMinutes : DEFAULT_HOUR_HEIGHT;
@@ -134,6 +141,9 @@ export default function StorageTab({ onSwitchTab }: Props) {
 
   const onSwitchTabRef = useRef(onSwitchTab);
   onSwitchTabRef.current = onSwitchTab;
+
+  const onSwitchToAnalyticsRef = useRef(onSwitchToAnalytics);
+  onSwitchToAnalyticsRef.current = onSwitchToAnalytics;
 
   const panResponder = useRef(
     PanResponder.create({
@@ -147,7 +157,8 @@ export default function StorageTab({ onSwitchTab }: Props) {
           if (gs.dx < 0) setOffset(o => o + 1);
           else setOffset(o => o - 1);
         } else {
-          onSwitchTabRef.current();
+          if (gs.dx > 0) onSwitchTabRef.current();
+          else onSwitchToAnalyticsRef.current();
         }
       },
     })
@@ -182,9 +193,10 @@ export default function StorageTab({ onSwitchTab }: Props) {
 
   function refreshEntries() {
     const result: Record<string, EntryRow[]> = {};
+    const fetchFn = displayMode === 'list' ? getEntriesByTrackingDate : getEntriesByDate;
     for (const day of days) {
       const key = toDateKey(day);
-      result[key] = getEntriesByDate(key);
+      result[key] = fetchFn(key);
     }
     setEntries(result);
   }
@@ -192,9 +204,10 @@ export default function StorageTab({ onSwitchTab }: Props) {
   useEffect(() => {
     const result: Record<string, EntryRow[]> = {};
     let hasOverlaps = false;
+    const fetchFn = displayMode === 'list' ? getEntriesByTrackingDate : getEntriesByDate;
     for (const day of days) {
       const key = toDateKey(day);
-      const dayEntries = getEntriesByDate(key);
+      const dayEntries = fetchFn(key);
       result[key] = dayEntries;
       if (displayMode === 'list' && findOverlappingIds(dayEntries).size > 0) {
         hasOverlaps = true;
@@ -223,6 +236,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
     setEditingEntry(entry);
     setEditStartInput(formatTime(entry.start_ms));
     setEditEndInput(formatTime(entry.end_ms));
+    setEditDescriptionInput(entry.description);
     setEditError('');
   }
 
@@ -240,7 +254,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
       setEditError('End time must be after start time');
       return;
     }
-    updateEntry(editingEntry.id, newStartMs, newEndMs);
+    updateEntry(editingEntry.id, newStartMs, newEndMs, editDescriptionInput.trim());
     setEditingEntry(null);
     refreshEntries();
   }
@@ -249,6 +263,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
     setAddCategoryId(categories.length > 0 ? categories[0].id : null);
     setAddStartInput('');
     setAddEndInput('');
+    setAddDescriptionInput('');
     setAddError('');
     setAddModalVisible(true);
   }
@@ -270,7 +285,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
       return;
     }
     const cat = categories.find(c => c.id === addCategoryId)!;
-    saveEntry({ categoryId: cat.id, title: '', startMs: newStartMs, endMs: newEndMs, elapsedMs: newEndMs - newStartMs });
+    saveEntry({ categoryId: cat.id, description: addDescriptionInput.trim(), startMs: newStartMs, endMs: newEndMs, elapsedMs: newEndMs - newStartMs });
     setAddModalVisible(false);
     refreshEntries();
   }
@@ -305,7 +320,14 @@ export default function StorageTab({ onSwitchTab }: Props) {
         <TouchableOpacity style={styles.navBtn} onPress={() => setOffset(o => o - 1)}>
           <Text style={styles.navArrow}>‹</Text>
         </TouchableOpacity>
-        <Text style={styles.rangeLabel}>{rangeLabel(days, displayMode === 'list' ? '1day' : mode)}</Text>
+        <View style={styles.navCenter}>
+          <Text style={styles.rangeLabel}>{rangeLabel(days, displayMode === 'list' ? '1day' : mode)}</Text>
+          {displayMode === 'calendar' ? (
+            <Text style={styles.navSubLabel}>displaying calendar date</Text>
+          ) : (
+            <Text style={styles.navSubLabel}>displaying tracking date (ends at {CUTOFF_DISPLAY})</Text>
+          )}
+        </View>
         <TouchableOpacity style={styles.navBtn} onPress={() => setOffset(o => o + 1)}>
           <Text style={styles.navArrow}>›</Text>
         </TouchableOpacity>
@@ -393,17 +415,22 @@ export default function StorageTab({ onSwitchTab }: Props) {
                     const d = new Date(entry.start_ms);
                     const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
                     const top = ((entry.start_ms - startOfDay) / 3600000) * hourHeight;
-                    const height = (entry.elapsed_ms / 3600000) * hourHeight;
+                    const height = Math.min((entry.elapsed_ms / 3600000) * hourHeight, 24 * hourHeight - top);
                     return (
                       <View
                         key={entry.id}
                         style={[styles.entryBlock, { top, height, backgroundColor: entry.category_color }]}
                       >
                         {height >= MIN_LABEL_HEIGHT && (
-                          <Text style={styles.entryText} numberOfLines={1}>
+                          <Text style={styles.entryText} numberOfLines={1} ellipsizeMode="tail">
                             {entry.category_name}
                           </Text>
                         )}
+                        {height >= MIN_DESCRIPTION_HEIGHT && entry.description ? (
+                          <Text style={styles.entryDescription} numberOfLines={1} ellipsizeMode="tail">
+                            {entry.description}
+                          </Text>
+                        ) : null}
                       </View>
                     );
                   })}
@@ -430,7 +457,14 @@ export default function StorageTab({ onSwitchTab }: Props) {
                       <Text style={styles.overlapBadgeText}>!</Text>
                     </View>
                   )}
-                  <Text style={styles.listCardTitle}>{entry.category_name}</Text>
+                  <View style={styles.listCardTitleRow}>
+                    <Text style={styles.listCardTitle}>{entry.category_name}</Text>
+                    {entry.description ? (
+                      <Text style={styles.listCardDescription} numberOfLines={1} ellipsizeMode="tail">
+                        {entry.description}
+                      </Text>
+                    ) : null}
+                  </View>
                   <View style={styles.listCardRow}>
                     <Text style={styles.listCardTime}>
                       {formatTime(entry.start_ms)} → {formatTime(entry.end_ms)}
@@ -454,6 +488,7 @@ export default function StorageTab({ onSwitchTab }: Props) {
         >
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Add Entry</Text>
+            <Text style={styles.navSubLabel}>saving times according to calendar date</Text>
 
             <Text style={styles.modalLabel}>Category</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryScroll}>
@@ -490,6 +525,14 @@ export default function StorageTab({ onSwitchTab }: Props) {
               autoCapitalize="characters"
             />
 
+            <Text style={styles.modalLabel}>Description</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={addDescriptionInput}
+              onChangeText={setAddDescriptionInput}
+              placeholder="What did you work on? (optional)"
+            />
+
             {addError ? <Text style={styles.editError}>{addError}</Text> : null}
 
             <View style={styles.modalBtnRow}>
@@ -515,6 +558,14 @@ export default function StorageTab({ onSwitchTab }: Props) {
             <View style={[styles.categoryPill, { backgroundColor: editingEntry?.category_color }]}>
               <Text style={styles.categoryPillText}>{editingEntry?.category_name}</Text>
             </View>
+
+            <Text style={styles.modalLabel}>Description</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editDescriptionInput}
+              onChangeText={setEditDescriptionInput}
+              placeholder="What did you work on?"
+            />
 
             <Text style={styles.modalLabel}>Start Time</Text>
             <TextInput
@@ -578,10 +629,18 @@ const styles = StyleSheet.create({
     color: '#1a6bcc',
     lineHeight: 52,
   },
+  navCenter: {
+    alignItems: 'center',
+    gap: 2,
+  },
   rangeLabel: {
     fontSize: 15,
     fontWeight: '600',
     color: '#202124',
+  },
+  navSubLabel: {
+    fontSize: 11,
+    color: '#70757a',
   },
   modeRow: {
     flexDirection: 'row',
@@ -698,6 +757,10 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
   },
+  entryDescription: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
+  },
   listContent: {
     padding: 16,
     gap: 10,
@@ -707,11 +770,22 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
+  listCardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
   listCardTitle: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
-    marginBottom: 6,
+    flexShrink: 0,
+  },
+  listCardDescription: {
+    flex: 1,
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
   },
   listCardRow: {
     flexDirection: 'row',
