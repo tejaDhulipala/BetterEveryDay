@@ -195,7 +195,7 @@ export default function App() {
     setAppState('paused');
   }
 
-  function handleNewActivity() {
+  function saveCurrentSession() {
     const cat = runCategoryRef.current;
     if (cat) {
       saveEntry({
@@ -207,6 +207,17 @@ export default function App() {
       });
     }
     setActivityDescription('');
+  }
+
+  function handleSaveSession() {
+    saveCurrentSession();
+    runCategoryRef.current = null;
+    setElapsed(0);
+    setAppState('base');
+  }
+
+  function handleNewActivity() {
+    saveCurrentSession();
     const now = Date.now();
     startRef.current = now;
     runCategoryRef.current = categories[selectedCategoryIndex] ?? null;
@@ -313,9 +324,14 @@ export default function App() {
               </TouchableOpacity>
             )}
             {appState === 'paused' && (
-              <TouchableOpacity style={[styles.btn, styles.btnReset]} onPress={handleNewActivity}>
-                <Text style={styles.btnText}>New Activity</Text>
-              </TouchableOpacity>
+              <>
+                <TouchableOpacity style={[styles.btn, styles.btnReset]} onPress={handleSaveSession}>
+                  <Text style={styles.btnText}>Save & Stop</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.btn, styles.btnReset]} onPress={handleNewActivity}>
+                  <Text style={styles.btnText}>New Activity</Text>
+                </TouchableOpacity>
+              </>
             )}
           </View>
 
